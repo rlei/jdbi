@@ -32,6 +32,7 @@ public class Handlers implements JdbiConfig<Handlers> {
     private final List<HandlerFactory> factories = new CopyOnWriteArrayList<>();
 
     public Handlers() {
+        register(new ConcreteImplStubHandlerFactory());
         register(new DefaultMethodHandlerFactory());
         register(new SqlMethodHandlerFactory());
         register(new BridgeMethodHandlerFactory());

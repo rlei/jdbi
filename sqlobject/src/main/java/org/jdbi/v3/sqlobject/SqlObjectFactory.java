@@ -22,7 +22,10 @@ import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
@@ -36,6 +39,8 @@ import org.jdbi.v3.core.extension.ExtensionMethod;
 import org.jdbi.v3.core.extension.HandleSupplier;
 import org.jdbi.v3.sqlobject.config.Configurer;
 import org.jdbi.v3.sqlobject.config.ConfiguringAnnotation;
+import org.jdbi.v3.sqlobject.internal.GeneratedSqlObjectInitData;
+import org.jdbi.v3.sqlobject.internal.HandlerKey;
 
 import static java.util.Collections.synchronizedMap;
 
@@ -45,7 +50,7 @@ import static java.util.Collections.synchronizedMap;
 public class SqlObjectFactory implements ExtensionFactory {
     private static final Object[] NO_ARGS = new Object[0];
 
-    private final Map<Class<?>, Map<Method, Handler>> handlersCache = synchronizedMap(new WeakHashMap<>());
+    private final Map<Class<?>, Map<HandlerKey, Handler>> handlersCache = synchronizedMap(new WeakHashMap<>());
     private final Map<Class<? extends Configurer>, Configurer> configurers = synchronizedMap(new WeakHashMap<>());
 
     SqlObjectFactory() {}
@@ -53,6 +58,10 @@ public class SqlObjectFactory implements ExtensionFactory {
     @Override
     public boolean accepts(Class<?> extensionType) {
         if (looksLikeSqlObject(extensionType)) {
+            if (extensionType.getAnnotation(GenerateSqlObject.class) != null) {
+                return true;
+            }
+
             if (!extensionType.isInterface()) {
                 throw new IllegalArgumentException("SQL Objects are only supported for interfaces.");
             }
@@ -83,7 +92,7 @@ public class SqlObjectFactory implements ExtensionFactory {
      */
     @Override
     public <E> E attach(Class<E> extensionType, HandleSupplier handle) {
-        Map<Method, Handler> handlers = methodHandlersFor(
+        Map<HandlerKey, Handler> handlers = methodHandlersFor(
                 extensionType,
                 handle.getConfig(Handlers.class),
                 handle.getConfig(HandlerDecorators.class));
@@ -98,6 +107,21 @@ public class SqlObjectFactory implements ExtensionFactory {
                 configurer.configureForType(instanceConfig, annotation, extensionType));
 
         InvocationHandler invocationHandler = createInvocationHandler(extensionType, instanceConfig, handlers, handle);
+
+        if (extensionType.getAnnotation(GenerateSqlObject.class) != null) {
+            try {
+                GeneratedSqlObjectInitData.INITIALIZER.set(handlers::get);
+                return extensionType.cast(
+                    Class.forName(extensionType.getPackage().getName() + "." + extensionType.getSimpleName() + "Impl")
+                        .getConstructor(HandleSupplier.class)
+                        .newInstance(handle));
+            } catch (ReflectiveOperationException | ExceptionInInitializerError e) {
+                throw new UnableToCreateSqlObjectException(e);
+            } finally {
+                GeneratedSqlObjectInitData.INITIALIZER.set(null);
+            }
+        }
+
         return extensionType.cast(
                 Proxy.newProxyInstance(
                         extensionType.getClassLoader(),
@@ -105,7 +129,7 @@ public class SqlObjectFactory implements ExtensionFactory {
                         invocationHandler));
     }
 
-    private Map<Method, Handler> methodHandlersFor(Class<?> sqlObjectType, Handlers registry, HandlerDecorators decorators) {
+    private Map<HandlerKey, Handler> methodHandlersFor(Class<?> sqlObjectType, Handlers registry, HandlerDecorators decorators) {
         return handlersCache.computeIfAbsent(sqlObjectType, type -> {
             final Map<Method, Handler> handlers = new HashMap<>();
 
@@ -121,14 +145,21 @@ public class SqlObjectFactory implements ExtensionFactory {
                 // optional implementation
             }
 
-            for (Method method : sqlObjectType.getMethods()) {
-                if (Modifier.isStatic(method.getModifiers())) {
+            final Set<Method> methods = new LinkedHashSet<>();
+            methods.addAll(Arrays.asList(sqlObjectType.getMethods()));
+            methods.addAll(Arrays.asList(sqlObjectType.getDeclaredMethods()));
+
+            final Set<HandlerKey> seen = handlers.keySet().stream()
+                    .map(HandlerKey::of)
+                    .collect(Collectors.toCollection(HashSet::new));
+            for (Method method : methods) {
+                if (Modifier.isStatic(method.getModifiers()) || !seen.add(HandlerKey.of(method))) {
                     continue;
                 }
-                handlers.computeIfAbsent(method, m -> buildMethodHandler(sqlObjectType, m, registry, decorators));
+                handlers.put(method, buildMethodHandler(sqlObjectType, method, registry, decorators));
             }
 
-            handlers.keySet().stream()
+            methods.stream()
                 .filter(m -> !m.isSynthetic())
                 .collect(Collectors.groupingBy(m -> Arrays.asList(m.getName(), Arrays.asList(m.getParameterTypes()))))
                 .values()
@@ -139,7 +170,9 @@ public class SqlObjectFactory implements ExtensionFactory {
                     throw new UnableToCreateSqlObjectException(sqlObjectType + " has ambiguous methods " + ms + ", please resolve with an explicit override");
                 });
 
-            return handlers;
+            return handlers.entrySet()
+                    .stream()
+                    .collect(Collectors.toMap(e -> HandlerKey.of(e.getKey()), Map.Entry::getValue));
         });
     }
 
@@ -164,7 +197,7 @@ public class SqlObjectFactory implements ExtensionFactory {
 
     private InvocationHandler createInvocationHandler(Class<?> sqlObjectType,
                                                       ConfigRegistry instanceConfig,
-                                                      Map<Method, Handler> handlers,
+                                                      Map<HandlerKey, Handler> handlers,
                                                       HandleSupplier handle) {
         Map<Method, ConfigRegistry> methodConfigs = new ConcurrentHashMap<>();
 
@@ -176,7 +209,7 @@ public class SqlObjectFactory implements ExtensionFactory {
 
         return (proxy, method, args) -> {
             ConfigRegistry methodConfig = methodConfigs.computeIfAbsent(method, createConfigForMethod).createCopy();
-            Handler handler = handlers.get(method);
+            Handler handler = handlers.get(HandlerKey.of(method));
 
             return handle.invokeInContext(
                 new ExtensionMethod(sqlObjectType, method),

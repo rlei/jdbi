@@ -13,23 +13,23 @@
  */
 package org.jdbi.v3.sqlobject;
 
-import org.jdbi.v3.core.JdbiException;
+import org.jdbi.v3.core.extension.HandleSupplier;
+import org.jdbi.v3.core.internal.exceptions.Sneaky;
 
 /**
- * Thrown when constructing a SqlObject fails.
+ * Implements the contract of a SQL Object method, sneakily ignoring checked exceptions.
  */
-public class UnableToCreateSqlObjectException extends JdbiException {
-    private static final long serialVersionUID = 1L;
+public interface UncheckedHandler extends Handler {
+    @Override
+    Object invoke(Object target, Object[] args, HandleSupplier handle);
 
-    public UnableToCreateSqlObjectException(String message) {
-        super(message);
-    }
-
-    public UnableToCreateSqlObjectException(Throwable cause) {
-        super(cause);
-    }
-
-    public UnableToCreateSqlObjectException(String message, Throwable cause) {
-        super(message, cause);
+    static UncheckedHandler of(Handler handler) {
+        return (t, a, h) -> {
+            try {
+                return handler.invoke(t, a, h);
+            } catch (Throwable x) {
+                throw Sneaky.throwAnyway(x);
+            }
+        };
     }
 }
