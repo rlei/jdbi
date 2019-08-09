@@ -32,6 +32,7 @@ import org.jdbi.v3.core.extension.ExtensionFactory;
 import org.jdbi.v3.core.extension.Extensions;
 import org.jdbi.v3.core.extension.HandleSupplier;
 import org.jdbi.v3.core.extension.NoSuchExtensionException;
+import org.jdbi.v3.core.internal.OnDemandExtensions;
 import org.jdbi.v3.core.internal.exceptions.Unchecked;
 import org.jdbi.v3.core.spi.JdbiPlugin;
 import org.jdbi.v3.core.statement.DefaultStatementBuilder;
@@ -306,7 +307,7 @@ public class Jdbi implements Configurable<Jdbi> {
             }
 
             StatementBuilder cache = statementBuilderFactory.get().createStatementBuilder(conn);
-            Handle h = new Handle(config.createCopy(), connectionFactory::closeConnection, transactionhandler.get(), cache, conn);
+            Handle h = new Handle(this, config.createCopy(), connectionFactory::closeConnection, transactionhandler.get(), cache, conn);
             for (JdbiPlugin p : plugins) {
                 h = p.customizeHandle(h);
             }
@@ -346,16 +347,13 @@ public class Jdbi implements Configurable<Jdbi> {
      * A convenience function which manages the lifecycle of a handle and yields it to a callback
      * for use by clients.
      *
-     * @param callback A callback which will receive an open Handle
+     * @param consumer A callback which will receive an open Handle
      * @param <X> exception type thrown by the callback, if any.
      *
      * @throws X any exception thrown by the callback
      */
-    public <X extends Exception> void useHandle(final HandleConsumer<X> callback) throws X {
-        withHandle(h -> {
-            callback.useHandle(h);
-            return null;
-        });
+    public <X extends Exception> void useHandle(final HandleConsumer<X> consumer) throws X {
+        withHandle(consumer.asCallback());
     }
 
     /**

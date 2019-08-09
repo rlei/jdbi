@@ -19,8 +19,9 @@ import org.jdbi.v3.core.config.ConfigRegistry;
 import org.jdbi.v3.core.extension.ExtensionMethod;
 import org.jdbi.v3.core.extension.HandleSupplier;
 import org.jdbi.v3.core.internal.JdbiThreadLocals;
+import org.jdbi.v3.core.internal.OnDemandHandleSupplier;
 
-class LazyHandleSupplier implements HandleSupplier, AutoCloseable {
+class LazyHandleSupplier implements HandleSupplier, AutoCloseable, OnDemandHandleSupplier {
     private final Object[] lock = new Object[0];
 
     private final Jdbi db;
@@ -38,6 +39,11 @@ class LazyHandleSupplier implements HandleSupplier, AutoCloseable {
     @Override
     public ConfigRegistry getConfig() {
         return config.get();
+    }
+
+    @Override
+    public Jdbi getJdbi() {
+        return db;
     }
 
     @Override

@@ -50,6 +50,7 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 public class Handle implements Closeable, Configurable<Handle> {
     private static final Logger LOG = LoggerFactory.getLogger(Handle.class);
 
+    private final Jdbi jdbi;
     private final ConnectionCloser closer;
     private final TransactionHandler transactions;
     private final Connection connection;
@@ -61,11 +62,13 @@ public class Handle implements Closeable, Configurable<Handle> {
 
     private boolean closed = false;
 
-    Handle(ConfigRegistry config,
+    Handle(Jdbi jdbi,
+           ConfigRegistry config,
            ConnectionCloser closer,
            TransactionHandler transactions,
            StatementBuilder statementBuilder,
            Connection connection) {
+        this.jdbi = jdbi;
         this.closer = closer;
         this.transactions = transactions;
         this.connection = connection;
@@ -74,6 +77,10 @@ public class Handle implements Closeable, Configurable<Handle> {
         this.extensionMethod = new ThreadLocal<>();
         this.statementBuilder = statementBuilder;
         this.forceEndTransactions = !transactions.isInTransaction(this);
+    }
+
+    public Jdbi getJdbi() {
+        return jdbi;
     }
 
     @Override
@@ -418,16 +425,13 @@ public class Handle implements Closeable, Configurable<Handle> {
     /**
      * Executes <code>callback</code> in a transaction.
      *
-     * @param callback a callback which will receive an open handle, in a transaction.
+     * @param consumer a callback which will receive an open handle, in a transaction.
      * @param <X> exception type thrown by the callback, if any
      *
      * @throws X any exception thrown by the callback
      */
-    public <X extends Exception> void useTransaction(final HandleConsumer<X> callback) throws X {
-        inTransaction(handle -> {
-            callback.useHandle(handle);
-            return null;
-        });
+    public <X extends Exception> void useTransaction(final HandleConsumer<X> consumer) throws X {
+        inTransaction(consumer.asCallback());
     }
 
     /**
@@ -473,15 +477,12 @@ public class Handle implements Closeable, Configurable<Handle> {
      * </p>
      * @param level the transaction isolation level which will be applied to the connection for the scope of this
      *              transaction, after which the original isolation level will be restored.
-     * @param callback a callback which will receive an open handle, in a transaction.
+     * @param consumer a callback which will receive an open handle, in a transaction.
      * @param <X> exception type thrown by the callback, if any
      * @throws X any exception thrown by the callback
      */
-    public <X extends Exception> void useTransaction(TransactionIsolationLevel level, HandleConsumer<X> callback) throws X {
-        inTransaction(level, handle -> {
-            callback.useHandle(handle);
-            return null;
-        });
+    public <X extends Exception> void useTransaction(TransactionIsolationLevel level, HandleConsumer<X> consumer) throws X {
+        inTransaction(level, consumer.asCallback());
     }
 
     /**
