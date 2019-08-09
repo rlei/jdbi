@@ -103,7 +103,8 @@ public class GenerateSqlObjectProcessor extends AbstractProcessor {
         final CodeBlock.Builder constructor = CodeBlock.builder()
                 .add("this.handle = handle;\n");
 
-        builder.addMethod(generateMethod(builder, staticInit, getHandle()));
+        builder.addMethod(generateMethod(builder, staticInit, element(SqlObject.class, "getHandle")));
+        builder.addMethod(generateMethod(builder, staticInit, element(SqlObject.class, "withHandle")));
         builder.addField(HandleSupplier.class, "handle", Modifier.PRIVATE, Modifier.FINAL);
 
         te.getEnclosedElements().stream()
@@ -160,12 +161,12 @@ public class GenerateSqlObjectProcessor extends AbstractProcessor {
         return builder.addCode(body).build();
     }
 
-    private Element getHandle() {
-        return processingEnv.getElementUtils().getTypeElement(SqlObject.class.getName()).getEnclosedElements()
+    private Element element(Class<?> klass, String name) {
+        return processingEnv.getElementUtils().getTypeElement(klass.getName()).getEnclosedElements()
                 .stream()
-                .filter(e -> e.getSimpleName().toString().equals("getHandle"))
+                .filter(e -> e.getSimpleName().toString().equals(name))
                 .findFirst()
-                .orElseThrow(() -> new IllegalStateException("no Handle.getHandle found"));
+                .orElseThrow(() -> new IllegalStateException("no " + klass + "." + name + " found"));
     }
 
     private String packageName(Element e) {
