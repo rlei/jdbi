@@ -60,6 +60,11 @@
         </dependency>
         <dependency>
             <groupId>org.jdbi</groupId>
+            <artifactId>jdbi3-stringtemplate4</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jdbi</groupId>
             <artifactId>jdbi3-core</artifactId>
             <classifier>tests</classifier>
             <scope>test</scope>

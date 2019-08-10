@@ -15,7 +15,12 @@ package org.jdbi.v3.generator;
 
 import java.io.IOException;
 import java.io.Writer;
+import java.lang.reflect.Method;
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -31,7 +36,9 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
+import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Types;
 import javax.tools.Diagnostic.Kind;
 import javax.tools.JavaFileObject;
@@ -42,13 +49,14 @@ import com.squareup.javapoet.MethodSpec;
 import com.squareup.javapoet.MethodSpec.Builder;
 import com.squareup.javapoet.TypeName;
 import com.squareup.javapoet.TypeSpec;
+import org.jdbi.v3.core.config.ConfigRegistry;
+import org.jdbi.v3.core.extension.ExtensionMethod;
 import org.jdbi.v3.core.extension.HandleSupplier;
 import org.jdbi.v3.core.generic.GenericType;
 import org.jdbi.v3.sqlobject.Handler;
 import org.jdbi.v3.sqlobject.SqlObject;
 import org.jdbi.v3.sqlobject.UncheckedHandler;
 import org.jdbi.v3.sqlobject.internal.GeneratedSqlObjectInitData;
-import org.jdbi.v3.sqlobject.internal.HandlerKey;
 
 @SupportedAnnotationTypes("org.jdbi.v3.sqlobject.GenerateSqlObject")
 @SupportedSourceVersion(SourceVersion.RELEASE_8)
@@ -86,7 +94,7 @@ public class GenerateSqlObjectProcessor extends AbstractProcessor {
         }
 
         final TypeElement te = (TypeElement) e;
-        final String implName = te.getSimpleName() + "Impl";
+        final String implName = te.getSimpleName().toString() + "Impl";
         final TypeSpec.Builder builder = TypeSpec.classBuilder(implName).addModifiers(Modifier.PUBLIC);
         final TypeName superName = TypeName.get(te.asType());
         if (te.getKind() == ElementKind.CLASS) {
@@ -98,14 +106,38 @@ public class GenerateSqlObjectProcessor extends AbstractProcessor {
 
         final CodeBlock.Builder staticInit = CodeBlock.builder()
                 .add("final $T handlerFactory = $T.initializer();\n",
-                        new GenericType<Function<HandlerKey, Handler>>() {}.getType(),
+                        new GenericType<Function<Method, Handler>>() {}.getType(),
                         GeneratedSqlObjectInitData.class);
         final CodeBlock.Builder constructor = CodeBlock.builder()
-                .add("this.handle = handle;\n");
+                .add("this.handle = handle;\n")
+                .add("config = handle.getConfig().createCopy();\n");
+
+        final Set<String> configurers = new HashSet<>();
+        final Set<DeclaredType> seen = new HashSet<>();
+        final Queue<DeclaredType> types = new LinkedList<>();
+        types.add((DeclaredType) e.asType());
+        DeclaredType type;
+        while ((type = types.poll()) != null) {
+            if (!seen.add(type)) {
+                continue;
+            }
+            final TypeElement typeElement = (TypeElement) type.asElement();
+            Optional.of(typeElement.getSuperclass())
+                .filter(e -> !(e instanceof NoType))
+                .map(DeclaredType.class::cast)
+                .ifPresent(types::add);
+            typeElement.getInterfaces()
+                .stream()
+                .map(DeclaredType.class::cast)
+                .forEach(types::add);
+            processingEnv.getMessager().printMessage(Kind.WARNING, "type " + type);
+            type.getAnnotationMirrors().forEach(am -> am.);
+        }
 
         builder.addMethod(generateMethod(builder, staticInit, element(SqlObject.class, "getHandle")));
         builder.addMethod(generateMethod(builder, staticInit, element(SqlObject.class, "withHandle")));
         builder.addField(HandleSupplier.class, "handle", Modifier.PRIVATE, Modifier.FINAL);
+        builder.addField(ConfigRegistry.class, "config", Modifier.PRIVATE, Modifier.FINAL);
 
         te.getEnclosedElements().stream()
                 .filter(ee -> ee.getKind() == ElementKind.METHOD)
@@ -140,21 +172,24 @@ public class GenerateSqlObjectProcessor extends AbstractProcessor {
                 .map(typeUtils::erasure)
                 .map(t -> t + ".class")
                 .collect(Collectors.joining(","));
-        final String returnType = typeUtils.erasure(ee.getReturnType()) + ".class";
-        final String handlerField = e.getSimpleName() + "_" + counter++;
+        final String methodField = "m_" + e.getSimpleName() + "_" + counter;
+        final String handlerField = "h_" + e.getSimpleName() + "_" + counter++;
+        typeBuilder.addField(ExtensionMethod.class, methodField, Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
         typeBuilder.addField(UncheckedHandler.class, handlerField, Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
-        staticInit.add("$L = UncheckedHandler.of(handlerFactory.apply($T.of($S, $L, new Class<?>[] {$L})));\n",
-                handlerField,
-                HandlerKey.class,
+        staticInit.add("$L = $T.lookupMethod($S, new Class<?>[] {$L});\n",
+                methodField,
+                GeneratedSqlObjectInitData.class,
                 e.getSimpleName(),
-                returnType,
                 paramTypes);
+        staticInit.add("$L = UncheckedHandler.of(handlerFactory.apply($L.getMethod()));\n",
+                handlerField,
+                methodField);
 
         final CodeBlock body = CodeBlock.builder()
-                .add("$L $L.$L(this, new Object[] {$L}, handle);\n",
+                .add("$L handle.invokeInContext($L, config, () -> $L.invoke(this, new Object[] {$L}, handle));\n",
                     ee.getReturnType().getKind() == TypeKind.VOID ? "" : ("return (" + ee.getReturnType().toString() + ")"), // NOPMD
+                    methodField,
                     handlerField,
-                    "invoke",
                     paramNames)
                 .build();
 

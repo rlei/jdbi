@@ -20,11 +20,14 @@ import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Something;
 import org.jdbi.v3.core.mapper.SomethingMapper;
 import org.jdbi.v3.core.rule.H2DatabaseRule;
+import org.jdbi.v3.core.statement.SqlStatements;
 import org.jdbi.v3.sqlobject.GenerateSqlObject;
 import org.jdbi.v3.sqlobject.SqlObject;
 import org.jdbi.v3.sqlobject.SqlObjectPlugin;
 import org.jdbi.v3.sqlobject.statement.SqlQuery;
 import org.jdbi.v3.sqlobject.statement.SqlUpdate;
+import org.jdbi.v3.stringtemplate4.StringTemplateEngine;
+import org.jdbi.v3.stringtemplate4.UseStringTemplateEngine;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -57,10 +60,21 @@ public class NonpublicSubclassTest {
         assertThat(dao.getHandle()).isSameAs(handle);
     }
 
+    @Test
+    public void extensionMethodConfiguration() {
+        dao.checkTemplateEngine();
+    }
+
     @GenerateSqlObject
+    @UseStringTemplateEngine
     abstract static class AbstractClassDao implements SqlObject {
         @SqlUpdate("insert into something (id, name) values (:id, :name)")
         abstract void insert(int id, String name);
+
+        public void checkTemplateEngine() {
+            assertThat(getHandle().getConfig(SqlStatements.class).getTemplateEngine())
+                .isInstanceOf(StringTemplateEngine.class);
+        }
 
         @SqlQuery("select * from something")
         abstract List<Something> list0();
