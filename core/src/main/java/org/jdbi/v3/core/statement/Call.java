@@ -14,7 +14,6 @@
 package org.jdbi.v3.core.statement;
 
 import java.sql.CallableStatement;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
@@ -23,13 +22,14 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 import org.jdbi.v3.core.Handle;
-import org.jdbi.v3.core.argument.Argument;
+import org.jdbi.v3.core.argument.NullArgument;
+import org.jdbi.v3.core.internal.exceptions.Unchecked;
 
 /**
  * Used for invoking stored procedures.
  */
 public class Call extends SqlStatement<Call> {
-    private final List<OutParamArgument> params = new ArrayList<>();
+    private final List<OutParam> outParams = new ArrayList<>();
 
     public Call(Handle handle, String sql) {
         super(handle, sql);
@@ -53,7 +53,7 @@ public class Call extends SqlStatement<Call> {
      * @return self
      */
     public Call registerOutParameter(int position, int sqlType, CallableStatementMapper mapper) {
-        getBinding().addPositional(position, new OutParamArgument(sqlType, mapper, null));
+        outParams.add(new PositionalOutParam(sqlType, mapper, position));
         return this;
     }
 
@@ -75,7 +75,7 @@ public class Call extends SqlStatement<Call> {
      * @return self
      */
     public Call registerOutParameter(String name, int sqlType, CallableStatementMapper mapper) {
-        getBinding().addNamed(name, new OutParamArgument(sqlType, mapper, name));
+        outParams.add(new NamedOutParam(sqlType, mapper, name));
         return this;
     }
 
@@ -98,6 +98,18 @@ public class Call extends SqlStatement<Call> {
         });
     }
 
+    @Override
+    void beforeBinding() {
+        super.beforeBinding();
+        outParams.forEach(Unchecked.consumer(OutParam::preBind));
+    }
+
+    @Override
+    void beforeExecution() {
+        super.beforeExecution();
+        outParams.forEach(Unchecked.consumer(OutParam::register));
+    }
+
     /**
      * Invoke the callable statement and process its {@link OutParameters} results,
      * returning a computed value of type {@code T}.
@@ -106,16 +118,10 @@ public class Call extends SqlStatement<Call> {
         try {
             internalExecute();
             OutParameters out = new OutParameters(getContext());
-            for (OutParamArgument param : params) {
-                Object obj = param.map((CallableStatement) stmt);
-
-                // convert from JDBC 1-based position to Jdbi's 0-based
-                int index = param.position - 1;
-                out.getMap().put(index, obj);
-
-                if (param.name != null) {
-                    out.getMap().put(param.name, obj);
-                }
+            for (OutParam param : outParams) {
+                out.getMap().put(
+                        param.resultKey(),
+                        param.map((CallableStatement) stmt));
             }
             return resultComputer.apply(out);
         } finally {
@@ -123,30 +129,57 @@ public class Call extends SqlStatement<Call> {
         }
     }
 
-    // TODO tostring?
-    private class OutParamArgument implements Argument {
-        private final int sqlType;
-        private final CallableStatementMapper mapper;
-        private final String name;
-        private int position;
+    abstract class OutParam {
+        final int sqlType;
+        final CallableStatementMapper mapper;
 
-        OutParamArgument(int sqlType, CallableStatementMapper mapper, String name) {
+        OutParam(int sqlType, CallableStatementMapper mapper) {
             this.sqlType = sqlType;
             this.mapper = mapper;
-            this.name = name;
-            params.add(this);
+        }
+
+        void register() throws SQLException {
+            register((CallableStatement) stmt);
+        }
+
+        abstract void preBind();
+        abstract void register(CallableStatement stmt) throws SQLException;
+        abstract Object resultKey();
+
+        abstract Object map(CallableStatement stmt);
+    }
+
+    class PositionalOutParam extends OutParam {
+        private final int position;
+
+        PositionalOutParam(int sqlType, CallableStatementMapper mapper, int position) {
+            super(sqlType, mapper);
+            this.position = position;
         }
 
         @Override
-        public void apply(int outPosition, PreparedStatement statement, StatementContext ctx) throws SQLException {
-            ((CallableStatement) statement).registerOutParameter(outPosition, sqlType);
-            this.position = outPosition;
+        void preBind() {
+            if (!getBinding().findForPosition(position).isPresent()) {
+                getBinding().addPositional(position, new NullArgument(sqlType));
+            }
         }
 
-        public Object map(CallableStatement stmt) {
+        @Override
+        void register(CallableStatement stmt) throws SQLException {
+            stmt.registerOutParameter(position + 1, sqlType);
+        }
+
+        @Override
+        Object resultKey() {
+            return position;
+        }
+
+        @Override
+        Object map(CallableStatement stmt) {
+            final int jdbcPos = position + 1;
             try {
                 if (mapper != null) {
-                    return mapper.map(position, stmt);
+                    return mapper.map(jdbcPos, stmt);
                 }
                 switch (sqlType) {
                     case Types.CLOB:
@@ -155,28 +188,95 @@ public class Call extends SqlStatement<Call> {
                     case Types.LONGVARCHAR:
                     case Types.NCLOB:
                     case Types.NVARCHAR:
-                        return stmt.getString(position);
+                        return stmt.getString(jdbcPos);
                     case Types.BLOB:
                     case Types.VARBINARY:
-                        return stmt.getBytes(position);
+                        return stmt.getBytes(jdbcPos);
                     case Types.SMALLINT:
-                        return stmt.getShort(position);
+                        return stmt.getShort(jdbcPos);
                     case Types.INTEGER:
-                        return stmt.getInt(position);
+                        return stmt.getInt(jdbcPos);
                     case Types.BIGINT:
-                        return stmt.getLong(position);
+                        return stmt.getLong(jdbcPos);
                     case Types.TIMESTAMP:
                         case Types.TIME:
-                        return stmt.getTimestamp(position);
+                        return stmt.getTimestamp(jdbcPos);
                     case Types.DATE:
-                        return stmt.getDate(position);
+                        return stmt.getDate(jdbcPos);
                     case Types.FLOAT:
-                        return stmt.getFloat(position);
+                        return stmt.getFloat(jdbcPos);
                     case Types.DECIMAL:
                     case Types.DOUBLE:
-                        return stmt.getDouble(position);
+                        return stmt.getDouble(jdbcPos);
                     default:
-                        return stmt.getObject(position);
+                        return stmt.getObject(jdbcPos);
+                }
+            } catch (SQLException e) {
+                throw new UnableToExecuteStatementException("Could not get OUT parameter from statement", e, getContext());
+            }
+        }
+    }
+
+    class NamedOutParam extends OutParam {
+        private final String name;
+
+        NamedOutParam(int sqlType, CallableStatementMapper mapper, String name) {
+            super(sqlType, mapper);
+            this.name = name;
+        }
+
+        @Override
+        void preBind() {
+            if (!getBinding().findForName(name, getContext()).isPresent()) {
+                getBinding().addNamed(name, new NullArgument(sqlType));
+            }
+        }
+
+        @Override
+        void register(CallableStatement stmt) throws SQLException {
+            stmt.registerOutParameter(name, sqlType);
+        }
+
+        @Override
+        Object resultKey() {
+            return name;
+        }
+
+        @Override
+        Object map(CallableStatement stmt) {
+            try {
+                if (mapper != null) {
+                    return mapper.map(name, stmt);
+                }
+                switch (sqlType) {
+                    case Types.CLOB:
+                    case Types.VARCHAR:
+                    case Types.LONGNVARCHAR:
+                    case Types.LONGVARCHAR:
+                    case Types.NCLOB:
+                    case Types.NVARCHAR:
+                        return stmt.getString(name);
+                    case Types.BLOB:
+                    case Types.VARBINARY:
+                        return stmt.getBytes(name);
+                    case Types.SMALLINT:
+                        return stmt.getShort(name);
+                    case Types.INTEGER:
+                        return stmt.getInt(name);
+                    case Types.BIGINT:
+                        return stmt.getLong(name);
+                    case Types.TIMESTAMP:
+                        case Types.TIME:
+                        return stmt.getTimestamp(name);
+                    case Types.DATE:
+                        return stmt.getDate(name);
+                    case Types.FLOAT:
+                        return stmt.getFloat(name);
+                    case Types.DECIMAL:
+                    case Types.DOUBLE:
+                        return stmt.getDouble(name);
+                    default:
+                        return stmt.getObject(name);
                 }
             } catch (SQLException e) {
                 throw new UnableToExecuteStatementException("Could not get OUT parameter from statement", e, getContext());

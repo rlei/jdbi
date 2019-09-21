@@ -21,4 +21,7 @@ import java.sql.SQLException;
  */
 public interface CallableStatementMapper {
     Object map(int position, CallableStatement stmt) throws SQLException;
+    default Object map(String name, CallableStatement stmt) throws SQLException {
+        throw new UnsupportedOperationException("mapping by name");
+    }
 }

@@ -99,6 +99,31 @@ public class TestBindBean {
                 .containsExactly(1, ValueType.valueOf("foo"));
     }
 
+    @Test
+    public void enumNameBinding() {
+        handle.execute("create table bean (value varchar)");
+        handle.createUpdate("insert into bean(value) values(:value)")
+            .bindBean(new EnumBean())
+            .execute();
+        assertThat(handle.createQuery("select value from bean").mapTo(String.class).one())
+            .isEqualTo(EnumType.NAME.name());
+    }
+
+    public class EnumBean {
+        public EnumType getValue() {
+            return EnumType.NAME;
+        }
+    }
+
+    public enum EnumType {
+        NAME {
+            @Override
+            public String toString() {
+                return "toString";
+            }
+        }
+    }
+
     public static class Bean {
         private int id;
         private ValueType valueType;

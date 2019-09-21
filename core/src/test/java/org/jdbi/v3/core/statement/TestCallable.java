@@ -17,9 +17,9 @@ import java.sql.Types;
 
 import org.assertj.core.data.Offset;
 import org.jdbi.v3.core.Handle;
-import org.jdbi.v3.core.rule.H2DatabaseRule;
+import org.jdbi.v3.core.rule.PgDatabaseRule;
+import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 
@@ -28,25 +28,31 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 public class TestCallable {
     @Rule
-    public H2DatabaseRule dbRule = new H2DatabaseRule();
+    public PgDatabaseRule dbRule = new PgDatabaseRule();
 
     private Handle h;
 
     @Before
     public void setUp() {
-        h = dbRule.getJdbi().open();
-        h.execute("CREATE ALIAS TO_DEGREES FOR \"java.lang.Math.toDegrees\"");
-        h.execute("CREATE ALIAS TEST_PROCEDURE FOR \"org.jdbi.v3.core.statement.TestCallable.testProcedure\"");
+        h = dbRule.openHandle();
+        h.execute("CREATE FUNCTION plus50(IN param INT) RETURNS INT AS $$ BEGIN return param + 50; END; $$ LANGUAGE plpgsql");
+        h.execute("CREATE FUNCTION plus100(INOUT param INT) AS $$ BEGIN param := param + 100; END; $$ LANGUAGE plpgsql");
+    }
+
+    @After
+    public void close() {
+        h.close();
     }
 
     @Test
-    public void testStatement() {
-        OutParameters ret = h.createCall("? = CALL TO_DEGREES(?)")
-                .registerOutParameter(0, Types.DOUBLE)
-                .bind(1, 100.0d)
+    public void positionalParam() {
+        OutParameters ret = h.createCall("{? = call plus50(?)}")
+                .configure(SqlStatements.class, s -> s.setUnusedBindingAllowed(true))
+                .registerOutParameter(0, Types.INTEGER)
+                .bind(1, 100)
                 .invoke();
 
-        Double expected = Math.toDegrees(100.0d);
+        Integer expected = 150;
         assertThat(ret.getDouble(0)).isEqualTo(expected, Offset.offset(0.001));
         assertThat(ret.getLong(0).longValue()).isEqualTo(expected.longValue());
         assertThat(ret.getShort(0).shortValue()).isEqualTo(expected.shortValue());
@@ -58,13 +64,13 @@ public class TestCallable {
     }
 
     @Test
-    public void testStatementWithNamedParam() {
-        OutParameters ret = h.createCall(":x = CALL TO_DEGREES(:y)")
-                .registerOutParameter("x", Types.DOUBLE)
-                .bind("y", 100.0d)
+    public void namedParam() {
+        OutParameters ret = h.createCall("{:x = call plus50(:y)}")
+                .registerOutParameter("x", Types.INTEGER)
+                .bind("y", 100)
                 .invoke();
 
-        Double expected = Math.toDegrees(100.0d);
+        Integer expected = 150;
         assertThat(ret.getDouble("x")).isEqualTo(expected, Offset.offset(0.001));
         assertThat(ret.getLong("x").longValue()).isEqualTo(expected.longValue());
         assertThat(ret.getShort("x").shortValue()).isEqualTo(expected.shortValue());
@@ -76,32 +82,24 @@ public class TestCallable {
     }
 
     @Test
-    @Ignore // TODO(scs): how do we test out parameters with h2?
-    public void testWithNullReturn() {
-        OutParameters ret = h.createCall("CALL TEST_PROCEDURE(?, ?)")
-                .bind(0, (String) null)
-                .registerOutParameter(1, Types.VARCHAR)
+    public void nullInout() {
+        OutParameters ret = h.createCall("{call plus100(:param)}")
+                .registerOutParameter("param", Types.INTEGER)
+                .bindNull("param", Types.INTEGER)
                 .invoke();
 
-        String out = ret.getString(1);
+        Integer out = ret.getInt(1);
         assertThat(out).isNull();
     }
 
     @Test
-    @Ignore // TODO(scs): how do we test out parameters with h2?
-    public void testWithNullReturnWithNamedParam() {
-        OutParameters ret = h.createCall("CALL TEST_PROCEDURE(:x, :y)")
-                .bind("x", (String) null)
-                .registerOutParameter("y", Types.VARCHAR)
+    public void nonnullInout() {
+        OutParameters ret = h.createCall("{call plus100(:param)}")
+                .registerOutParameter("param", Types.INTEGER)
+                .bind("param", 42)
                 .invoke();
 
-        String out = ret.getString("y");
-        assertThat(out).isNull();
-    }
-
-    // used by the db in this test
-    @SuppressWarnings("unused")
-    public static void testProcedure(String in, String[] out) {
-        // TODO do something
+        Integer out = ret.getInt(1);
+        assertThat(out).isEqualTo(142);
     }
 }
